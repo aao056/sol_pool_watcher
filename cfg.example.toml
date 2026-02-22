@@ -1,0 +1,43 @@
+[venues.raydium_clmm]
+enabled = true
+program_id = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.raydium_amm]
+enabled = false
+# program_id = "..."
+
+[venues.meteora_damm]
+enabled = true
+program_id = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.meteora_dlmm]
+enabled = true
+program_id = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.pumpswap]
+enabled = true
+program_id = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.orca_whirlpool]
+enabled = true
+program_id = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
