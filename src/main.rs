@@ -3,7 +3,9 @@ mod constants;
 mod domain;
 mod notifier;
 mod pipeline;
+mod pool_registry;
 mod services;
+mod tracking;
 mod venues;
 
 use anyhow::{Context, Result};
@@ -12,6 +14,7 @@ use config::parse_cfg;
 use constants::{DEFAULT_RPC_TIMEOUT_SECS, HEALTHCHECK_INTERVAL_SECS};
 use notifier::TelegramNotifier;
 use pipeline::EventPipeline;
+use pool_registry::PoolRegistry;
 use reqwest::Client as HttpClient;
 use serde_json::{Value, json};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
@@ -119,6 +122,7 @@ async fn main() -> Result<()> {
     );
 
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (flow_tx, flow_rx) = tokio::sync::mpsc::unbounded_channel();
 
     let runtime = VenueRuntime {
         ws_url: wss_url.clone(),
@@ -126,6 +130,7 @@ async fn main() -> Result<()> {
         rpc_client: rpc_client.clone(),
         http_client: http_client.clone(),
         event_tx: event_tx.clone(),
+        flow_tx: flow_tx.clone(),
     };
     let health_http_client = http_client.clone();
 
@@ -135,14 +140,22 @@ async fn main() -> Result<()> {
         watcher_tasks.push((name, watcher.spawn(runtime.clone())));
     }
     drop(event_tx);
+    drop(flow_tx);
 
     let pipeline = EventPipeline {
         http_client,
         rpc_client,
         rpc_url: rpc_url.clone(),
+        pool_registry: PoolRegistry::try_new_default(),
+        tracking: tracking::TrackingManager::new(
+            cfg.tracking.clone(),
+            health_http_client.clone(),
+            rpc_url.clone(),
+            telegram.clone(),
+        ),
         telegram,
     };
-    let pipeline_task = tokio::spawn(pipeline.run(event_rx));
+    let pipeline_task = tokio::spawn(pipeline.run(event_rx, flow_rx));
 
     let mut health_interval = tokio::time::interval(Duration::from_secs(HEALTHCHECK_INTERVAL_SECS));
     health_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

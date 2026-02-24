@@ -37,6 +37,29 @@ impl VenueEvent {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FlowSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Clone, Debug)]
+pub struct PoolSwapFlowEvent {
+    pub venue: VenueId,
+    pub pool_id: String,
+    pub side: FlowSide,
+    pub quote_volume: f64,
+    pub quote_liquidity: Option<f64>,
+    pub mark_price_ratio: Option<f64>,
+    pub ts_unix: u64,
+}
+
+impl PoolSwapFlowEvent {
+    pub fn pool_dedupe_key(&self) -> String {
+        format!("{}:{}:{}", self.venue.dex, self.venue.kind, self.pool_id)
+    }
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct TokenMetadataLite {
     pub name: Option<String>,

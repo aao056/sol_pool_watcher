@@ -88,13 +88,16 @@ pub fn build_telegram_message(
 👀 Token: {token_name} (https://solscan.io/token/{}) ({})\n\
 ⚖️ Pair: {pair_symbol} (https://solscan.io/account/{})\n\
 🆔 Pool ID: {}\n\
-👥 Top Holders: {top_holders_line}\n\n\
+👥 Top Holders: {top_holders_line}\n\
+🔎 Manual: DexScreener https://dexscreener.com/search?q={} | RugCheck https://rugcheck.xyz/tokens/{}\n\n\
 Tx: https://solscan.io/tx/{}{}",
         event.venue.display_name,
         event.token_mint,
         event.token_mint,
         event.pool_id,
         event.pool_id,
+        event.token_mint,
+        event.token_mint,
         event.signature,
         rugcheck_section,
     )

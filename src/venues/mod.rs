@@ -2,16 +2,15 @@ pub mod meteora;
 pub mod orca;
 pub mod pumpswap;
 pub mod raydium;
-mod stub;
 
 use crate::config::Config;
-use crate::domain::{VenueEvent, VenueId};
+use crate::domain::{PoolSwapFlowEvent, VenueEvent};
 use crate::venues::meteora::damm::MeteoraDammWatcher;
 use crate::venues::meteora::dlmm::MeteoraDlmmWatcher;
 use crate::venues::orca::OrcaWhirlpoolWatcher;
 use crate::venues::pumpswap::PumpSwapWatcher;
+use crate::venues::raydium::amm::RaydiumAmmWatcher;
 use crate::venues::raydium::clmm::RaydiumClmmWatcher;
-use crate::venues::stub::StubVenueWatcher;
 use anyhow::{Context, Result};
 use reqwest::Client as HttpClient;
 use solana_pubkey::Pubkey;
@@ -29,6 +28,7 @@ pub struct VenueRuntime {
     pub rpc_client: Arc<RpcClient>,
     pub http_client: HttpClient,
     pub event_tx: UnboundedSender<VenueEvent>,
+    pub flow_tx: UnboundedSender<PoolSwapFlowEvent>,
 }
 
 pub trait VenueWatcher: Send {
@@ -50,9 +50,12 @@ pub fn build_watchers(cfg: &Config) -> Result<Vec<Box<dyn VenueWatcher>>> {
     }
 
     if cfg.venues.raydium_amm.enabled {
-        watchers.push(Box::new(StubVenueWatcher::new(
-            VenueId::new("raydium", "amm", "Raydium AMM"),
-            cfg.venues.raydium_amm.program_id.clone(),
+        let amm_program_id = Pubkey::from_str(&cfg.raydium_amm_program_id())
+            .context("invalid raydium amm program_id")?;
+        let allowed_quote_mints = cfg.raydium_amm_allowed_quote_mints();
+        watchers.push(Box::new(RaydiumAmmWatcher::new(
+            amm_program_id,
+            allowed_quote_mints,
         )));
     }
 
