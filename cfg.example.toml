@@ -61,23 +61,3 @@ allowed_quote_mints = [
   "So11111111111111111111111111111111111111112", # SOL
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
 ]
-
-[tracking]
-enabled = false
-tick_interval_secs = 10
-refresh_interval_secs = 20
-light_tracking_secs = 60
-tracking_secs = 600
-notify_cooldown_secs = 60
-update_score_delta_threshold = 10
-liquidity_drop_alert_ratio = 0.15
-promote_min_score = 55
-promote_min_liquidity_usd = 20000.0
-promote_require_low_risk = true
-cpmm_assumed_fee_bps = 30
-impact_small_usd = 100.0
-impact_large_usd = 1000.0
-shadow_enabled = true
-shadow_take_profit_bps = 2000
-shadow_stop_loss_bps = 1200
-shadow_max_hold_secs = 1200
