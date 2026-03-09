@@ -8,6 +8,9 @@ use tracing::warn;
 pub struct TelegramNotifier {
     bot_token: String,
     chat_id: String,
+    default_thread_id: Option<i64>,
+    error_thread_id: Option<i64>,
+    sim_thread_id: Option<i64>,
     client: HttpClient,
 }
 
@@ -36,6 +39,9 @@ impl TelegramNotifier {
                 Some(Self {
                     bot_token,
                     chat_id,
+                    default_thread_id: parse_i64_env("TG_MESSAGE_THREAD_ID"),
+                    error_thread_id: parse_i64_env("TG_ERROR_MESSAGE_THREAD_ID"),
+                    sim_thread_id: parse_i64_env("TG_SIM_THREAD_ID"),
                     client,
                 })
             }
@@ -50,12 +56,29 @@ impl TelegramNotifier {
     }
 
     pub async fn send_event(&self, text: &str) {
+        self.send_with_thread(text, self.default_thread_id).await;
+    }
+
+    pub async fn send_error(&self, text: &str) {
+        self.send_with_thread(text, self.error_thread_id.or(self.default_thread_id))
+            .await;
+    }
+
+    pub async fn send_sim(&self, text: &str) {
+        self.send_with_thread(text, self.sim_thread_id.or(self.default_thread_id))
+            .await;
+    }
+
+    async fn send_with_thread(&self, text: &str, thread_id: Option<i64>) {
         let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
-        let payload = json!({
+        let mut payload = json!({
             "chat_id": self.chat_id,
             "text": text,
             "disable_web_page_preview": true,
         });
+        if let Some(thread_id) = thread_id {
+            payload["message_thread_id"] = json!(thread_id);
+        }
 
         match self.client.post(url).json(&payload).send().await {
             Ok(resp) if resp.status().is_success() => {}
@@ -67,4 +90,10 @@ impl TelegramNotifier {
             }
         }
     }
+}
+
+fn parse_i64_env(name: &str) -> Option<i64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.trim().parse::<i64>().ok())
 }

@@ -1,7 +1,8 @@
 use crate::constants::{
     DEFAULT_METEORA_DAMM_PROGRAM_ID, DEFAULT_METEORA_DLMM_PROGRAM_ID,
-    DEFAULT_ORCA_WHIRLPOOL_PROGRAM_ID, DEFAULT_PUMPSWAP_PROGRAM_ID, DEFAULT_RAYDIUM_AMM_PROGRAM_ID,
-    DEFAULT_RAYDIUM_CLMM_PROGRAM_ID, MINT_USDC, MINT_WSOL,
+    DEFAULT_ORCA_WHIRLPOOL_PROGRAM_ID, DEFAULT_PANCAKESWAP_CLMM_PROGRAM_ID,
+    DEFAULT_PUMPSWAP_PROGRAM_ID, DEFAULT_RAYDIUM_AMM_PROGRAM_ID, DEFAULT_RAYDIUM_CLMM_PROGRAM_ID,
+    DEFAULT_RAYDIUM_CPMM_PROGRAM_ID, MINT_USDC, MINT_WSOL,
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -28,6 +29,10 @@ pub struct LegacyRaydiumConfig {
 pub struct VenuesConfig {
     #[serde(default)]
     pub raydium_clmm: RaydiumClmmConfig,
+    #[serde(default)]
+    pub pancakeswap_clmm: ToggleVenueConfig,
+    #[serde(default)]
+    pub raydium_cpmm: ToggleVenueConfig,
     #[serde(default)]
     pub raydium_amm: ToggleVenueConfig,
     #[serde(default)]
@@ -257,6 +262,24 @@ pub fn parse_cfg(path: &str) -> Result<Config> {
 }
 
 impl Config {
+    pub fn raydium_cpmm_program_id(&self) -> String {
+        self.venues
+            .raydium_cpmm
+            .program_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_RAYDIUM_CPMM_PROGRAM_ID.to_string())
+    }
+
+    pub fn raydium_cpmm_allowed_quote_mints(&self) -> HashSet<String> {
+        normalize_mints(
+            self.venues
+                .raydium_cpmm
+                .allowed_quote_mints
+                .clone()
+                .or_else(|| self.raydium.allowed_quote_mints.clone()),
+        )
+    }
+
     pub fn raydium_amm_program_id(&self) -> String {
         self.venues
             .raydium_amm
@@ -288,6 +311,24 @@ impl Config {
         normalize_mints(
             self.venues
                 .raydium_clmm
+                .allowed_quote_mints
+                .clone()
+                .or_else(|| self.raydium.allowed_quote_mints.clone()),
+        )
+    }
+
+    pub fn pancakeswap_clmm_program_id(&self) -> String {
+        self.venues
+            .pancakeswap_clmm
+            .program_id
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PANCAKESWAP_CLMM_PROGRAM_ID.to_string())
+    }
+
+    pub fn pancakeswap_clmm_allowed_quote_mints(&self) -> HashSet<String> {
+        normalize_mints(
+            self.venues
+                .pancakeswap_clmm
                 .allowed_quote_mints
                 .clone()
                 .or_else(|| self.raydium.allowed_quote_mints.clone()),

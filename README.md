@@ -6,6 +6,8 @@ Multi-venue Solana new-pool listener with Telegram notifications.
 
 Implemented watcher:
 - Raydium CLMM `CreatePool`
+- Raydium CPMM `initialize`
+- PancakeSwap CLMM `create_pool`
 - Raydium AMM `initialize2`
 - Meteora DAMM `initialize_pool` (via self-CPI `EvtInitializePool` event decoding)
 - Meteora DLMM `initialize_lb_pair2` (via self-CPI `LbPairCreate` event decoding)
@@ -14,7 +16,7 @@ Implemented watcher:
 
 ## What it does
 
-- subscribes to venue logs (Raydium CLMM + Meteora DAMM + Meteora DLMM + PumpSwap + Orca Whirlpool)
+- subscribes to venue logs (Raydium CLMM + Raydium CPMM + PancakeSwap CLMM + Meteora DAMM + Meteora DLMM + PumpSwap + Orca Whirlpool)
 - resolves `pool_id` + token mints
 - filters to configured quote mints (default SOL/USDC)
 - enriches with token metadata and RugCheck report
@@ -60,6 +62,14 @@ allowed_quote_mints = [
 [venues.raydium_amm]
 enabled = false
 program_id = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.raydium_cpmm]
+enabled = false
+program_id = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
 allowed_quote_mints = [
   "So11111111111111111111111111111111111111112", # SOL
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC

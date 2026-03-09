@@ -1,5 +1,5 @@
 use crate::constants::MAX_SEEN_SIGNATURES;
-use crate::domain::{VenueEvent, VenueId};
+use crate::domain::{FlowSide, PoolSwapFlowEvent, VenueEvent, VenueId};
 use crate::services::select_token_and_quote;
 use crate::venues::{VenueRuntime, VenueWatcher};
 use anchor_lang::event::EVENT_IX_TAG_LE;
@@ -12,12 +12,14 @@ use solana_pubsub_client::nonblocking::pubsub_client::PubsubClient;
 use solana_rpc_client_types::config::{
     CommitmentConfig, RpcTransactionLogsConfig, RpcTransactionLogsFilter,
 };
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
 const CREATE_POOL_IX_DISCRIMINATOR: [u8; 8] = [233, 146, 209, 142, 207, 104, 64, 188];
+const BUY_IX_DISCRIMINATOR: [u8; 8] = [102, 6, 61, 18, 1, 218, 235, 234];
+const SELL_IX_DISCRIMINATOR: [u8; 8] = [51, 230, 133, 164, 1, 127, 131, 173];
 const CREATE_POOL_EVENT_DISCRIMINATOR: [u8; 8] = [177, 49, 12, 210, 160, 118, 167, 116];
 const CREATE_POOL_EVENT_MIN_BYTES_TO_POOL: usize = 197;
 
@@ -33,6 +35,12 @@ struct PumpSwapPoolCreate {
 struct PumpSwapCreatePoolEvent {
     pool_id: String,
     base_mint: String,
+    quote_mint: String,
+}
+
+#[derive(Clone, Debug)]
+struct PumpSwapTrackedPool {
+    token_mint: String,
     quote_mint: String,
 }
 
@@ -55,10 +63,11 @@ impl PumpSwapWatcher {
         let ps_client = PubsubClient::new(&runtime.ws_url)
             .await
             .context("failed to connect ws for pumpswap logs listener")?;
+        let program_id = self.program_id.to_string();
 
         let (mut stream, _unsub) = ps_client
             .logs_subscribe(
-                RpcTransactionLogsFilter::Mentions(vec![self.program_id.to_string()]),
+                RpcTransactionLogsFilter::Mentions(vec![program_id.clone()]),
                 RpcTransactionLogsConfig {
                     commitment: Some(CommitmentConfig::confirmed()),
                 },
@@ -69,6 +78,7 @@ impl PumpSwapWatcher {
         let mut seen_signatures: HashSet<String> = HashSet::new();
         let mut seen_order: VecDeque<String> = VecDeque::new();
         let mut seen_pool_ids: HashSet<String> = HashSet::new();
+        let mut tracked_pools: HashMap<String, PumpSwapTrackedPool> = HashMap::new();
 
         info!(
             venue = %self.venue.slug(),
@@ -83,7 +93,9 @@ impl PumpSwapWatcher {
             if msg.value.err.is_some() {
                 continue;
             }
-            if !log_has_create_pool(&msg.value.logs) {
+            let has_create_pool = log_has_create_pool(&msg.value.logs);
+            let has_swap = log_has_swap(&msg.value.logs);
+            if !has_create_pool && !has_swap {
                 continue;
             }
 
@@ -97,11 +109,11 @@ impl PumpSwapWatcher {
                 continue;
             }
 
-            let Some(pool_create) = fetch_pumpswap_pool_create_with_retry(
+            let Some(tx_json) = fetch_pumpswap_transaction_json_with_retry(
                 &runtime.http_client,
                 &runtime.rpc_url,
                 &signature,
-                &self.program_id.to_string(),
+                &program_id,
             )
             .await
             .map_err(|err| {
@@ -109,63 +121,80 @@ impl PumpSwapWatcher {
                     venue = %self.venue.slug(),
                     signature = %signature,
                     ?err,
-                    "failed to resolve pumpswap create_pool transaction"
+                    "failed to resolve pumpswap transaction"
                 );
                 err
             })
             .ok()
             .flatten() else {
-                info!(
-                    venue = %self.venue.slug(),
-                    signature = %signature,
-                    "create_pool detected but failed to decode pool/base/quote"
-                );
                 continue;
             };
 
-            if !seen_pool_ids.insert(pool_create.pool_id.clone()) {
-                continue;
+            if has_create_pool
+                && let Some(pool_create) =
+                    extract_pumpswap_pool_create_from_get_transaction_json(&tx_json, &program_id)
+            {
+                if let Some((token_mint, quote_mint)) = select_token_and_quote(
+                    &pool_create.base_mint,
+                    &pool_create.quote_mint,
+                    &self.allowed_quote_mints,
+                ) {
+                    tracked_pools.entry(pool_create.pool_id.clone()).or_insert(
+                        PumpSwapTrackedPool {
+                            token_mint: token_mint.clone(),
+                            quote_mint: quote_mint.clone(),
+                        },
+                    );
+
+                    if seen_pool_ids.insert(pool_create.pool_id.clone()) {
+                        if runtime
+                            .event_tx
+                            .send(VenueEvent {
+                                venue: self.venue.clone(),
+                                signature: signature.clone(),
+                                pool_id: pool_create.pool_id.clone(),
+                                token_mint,
+                                quote_mint,
+                            })
+                            .is_err()
+                        {
+                            warn!("event channel closed; stopping watcher");
+                            break;
+                        }
+
+                        info!(
+                            venue = %self.venue.slug(),
+                            pool_id = %pool_create.pool_id,
+                            base_mint = %pool_create.base_mint,
+                            quote_mint = %pool_create.quote_mint,
+                            event_seen = pool_create.event_seen,
+                            "decoded pumpswap create_pool"
+                        );
+                    }
+                } else {
+                    info!(
+                        venue = %self.venue.slug(),
+                        signature = %signature,
+                        pool_id = %pool_create.pool_id,
+                        base_mint = %pool_create.base_mint,
+                        quote_mint = %pool_create.quote_mint,
+                        "create_pool detected but pair does not match quote filter"
+                    );
+                }
             }
 
-            let Some((token_mint, quote_mint)) = select_token_and_quote(
-                &pool_create.base_mint,
-                &pool_create.quote_mint,
-                &self.allowed_quote_mints,
-            ) else {
-                info!(
-                    venue = %self.venue.slug(),
-                    signature = %signature,
-                    pool_id = %pool_create.pool_id,
-                    base_mint = %pool_create.base_mint,
-                    quote_mint = %pool_create.quote_mint,
-                    "create_pool detected but pair does not match quote filter"
-                );
-                continue;
-            };
-
-            if runtime
-                .event_tx
-                .send(VenueEvent {
-                    venue: self.venue.clone(),
-                    signature,
-                    pool_id: pool_create.pool_id.clone(),
-                    token_mint,
-                    quote_mint,
-                })
-                .is_err()
+            if has_swap
+                && let Some(flow_event) = extract_pumpswap_swap_flow_from_get_transaction_json(
+                    &tx_json,
+                    &self.venue,
+                    &program_id,
+                    &tracked_pools,
+                )
+                && runtime.flow_tx.send(flow_event).is_err()
             {
-                warn!("event channel closed; stopping watcher");
+                warn!("flow channel closed; stopping watcher");
                 break;
             }
-
-            info!(
-                venue = %self.venue.slug(),
-                pool_id = %pool_create.pool_id,
-                base_mint = %pool_create.base_mint,
-                quote_mint = %pool_create.quote_mint,
-                event_seen = pool_create.event_seen,
-                "decoded pumpswap create_pool"
-            );
         }
 
         warn!(venue = %self.venue.slug(), "pumpswap logs stream ended");
@@ -212,18 +241,25 @@ fn log_has_create_pool(logs: &[String]) -> bool {
     })
 }
 
-async fn fetch_pumpswap_pool_create_with_retry(
+fn log_has_swap(logs: &[String]) -> bool {
+    logs.iter().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("instruction: buy") || lower.contains("instruction: sell")
+    })
+}
+
+async fn fetch_pumpswap_transaction_json_with_retry(
     http_client: &HttpClient,
     rpc_url: &str,
     signature: &str,
-    program_id: &str,
-) -> Result<Option<PumpSwapPoolCreate>> {
+    _program_id: &str,
+) -> Result<Option<Value>> {
     let attempts = 6usize;
     let mut last_err: Option<anyhow::Error> = None;
 
     for i in 0..attempts {
-        match fetch_pumpswap_pool_create(http_client, rpc_url, signature, program_id).await {
-            Ok(Some(event)) => return Ok(Some(event)),
+        match fetch_pumpswap_transaction_json(http_client, rpc_url, signature).await {
+            Ok(Some(tx_json)) => return Ok(Some(tx_json)),
             Ok(None) => {}
             Err(err) => last_err = Some(err),
         }
@@ -239,12 +275,11 @@ async fn fetch_pumpswap_pool_create_with_retry(
     Ok(None)
 }
 
-async fn fetch_pumpswap_pool_create(
+async fn fetch_pumpswap_transaction_json(
     http_client: &HttpClient,
     rpc_url: &str,
     signature: &str,
-    program_id: &str,
-) -> Result<Option<PumpSwapPoolCreate>> {
+) -> Result<Option<Value>> {
     let body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -281,9 +316,7 @@ async fn fetch_pumpswap_pool_create(
         return Ok(None);
     }
 
-    Ok(extract_pumpswap_pool_create_from_get_transaction_json(
-        &tx_json, program_id,
-    ))
+    Ok(Some(tx_json))
 }
 
 fn extract_pumpswap_pool_create_from_get_transaction_json(
@@ -298,6 +331,97 @@ fn extract_pumpswap_pool_create_from_get_transaction_json(
         top_level.event_seen = true;
     }
     Some(top_level)
+}
+
+fn extract_pumpswap_swap_flow_from_get_transaction_json(
+    tx_json: &Value,
+    venue: &VenueId,
+    program_id: &str,
+    tracked_pools: &HashMap<String, PumpSwapTrackedPool>,
+) -> Option<PoolSwapFlowEvent> {
+    if tracked_pools.is_empty() {
+        return None;
+    }
+
+    let instructions = message_instructions(tx_json)?;
+    let account_keys = message_account_keys(tx_json);
+    let (pre_balances, post_balances) = token_balance_maps(tx_json);
+    if pre_balances.is_empty() || post_balances.is_empty() {
+        return None;
+    }
+
+    for ix in instructions {
+        if !instruction_targets_program(ix, account_keys, program_id) {
+            continue;
+        }
+
+        let Some(raw_data) = decode_instruction_data(ix) else {
+            continue;
+        };
+        let is_buy = raw_data.starts_with(&BUY_IX_DISCRIMINATOR);
+        let is_sell = raw_data.starts_with(&SELL_IX_DISCRIMINATOR);
+        if !is_buy && !is_sell {
+            continue;
+        }
+
+        let pool_id = ix_account_pubkey(ix, account_keys, 0)?;
+        let tracked = tracked_pools.get(&pool_id)?;
+        let base_mint = ix_account_pubkey(ix, account_keys, 3)?;
+        let quote_mint = ix_account_pubkey(ix, account_keys, 4)?;
+        let base_vault_idx = ix_account_index(ix, account_keys, 7)?;
+        let quote_vault_idx = ix_account_index(ix, account_keys, 8)?;
+
+        let (token_vault_idx, quote_vault_idx, token_is_base) =
+            if tracked.token_mint == base_mint && tracked.quote_mint == quote_mint {
+                (base_vault_idx, quote_vault_idx, true)
+            } else if tracked.token_mint == quote_mint && tracked.quote_mint == base_mint {
+                (quote_vault_idx, base_vault_idx, false)
+            } else {
+                continue;
+            };
+
+        let quote_pre = pre_balances.get(&quote_vault_idx).copied()?;
+        let quote_post = post_balances.get(&quote_vault_idx).copied()?;
+        let quote_volume = (quote_post - quote_pre).abs();
+        if !quote_volume.is_finite() || quote_volume <= 0.0 {
+            continue;
+        }
+
+        let token_pre = pre_balances.get(&token_vault_idx).copied();
+        let token_post = post_balances.get(&token_vault_idx).copied();
+        let side = match (token_pre, token_post) {
+            (Some(pre), Some(post)) if post < pre => FlowSide::Buy,
+            (Some(pre), Some(post)) if post > pre => FlowSide::Sell,
+            _ if is_buy && token_is_base => FlowSide::Buy,
+            _ if is_buy && !token_is_base => FlowSide::Sell,
+            _ if is_sell && token_is_base => FlowSide::Sell,
+            _ => FlowSide::Buy,
+        };
+
+        let quote_liquidity = Some(quote_post);
+        let mark_price_ratio = match (token_post, quote_liquidity) {
+            (Some(token_liq), Some(quote_liq)) if token_liq > 0.0 => Some(quote_liq / token_liq),
+            _ => None,
+        };
+
+        let ts_unix = tx_json
+            .pointer("/result/blockTime")
+            .and_then(Value::as_i64)
+            .and_then(|v| if v >= 0 { Some(v as u64) } else { None })
+            .unwrap_or_else(now_unix_secs);
+
+        return Some(PoolSwapFlowEvent {
+            venue: venue.clone(),
+            pool_id,
+            side,
+            quote_volume,
+            quote_liquidity,
+            mark_price_ratio,
+            ts_unix,
+        });
+    }
+
+    None
 }
 
 fn extract_create_pool_from_top_level_instruction(
@@ -465,6 +589,28 @@ fn ix_account_pubkey(
         .map(ToString::to_string)
 }
 
+fn ix_account_index(
+    ix: &Value,
+    account_keys: Option<&Vec<Value>>,
+    account_position: usize,
+) -> Option<usize> {
+    let accounts = ix.get("accounts").and_then(Value::as_array)?;
+    let value = accounts.get(account_position)?;
+
+    if let Some(index) = value.as_u64() {
+        return Some(index as usize);
+    }
+
+    if let Some(pubkey) = value.as_str() {
+        return account_keys.and_then(|keys| account_key_index(keys, pubkey));
+    }
+
+    value
+        .get("pubkey")
+        .and_then(Value::as_str)
+        .and_then(|pubkey| account_keys.and_then(|keys| account_key_index(keys, pubkey)))
+}
+
 fn account_key_at(account_keys: &[Value], idx: usize) -> Option<String> {
     let entry = account_keys.get(idx)?;
     if let Some(s) = entry.as_str() {
@@ -474,6 +620,69 @@ fn account_key_at(account_keys: &[Value], idx: usize) -> Option<String> {
         .get("pubkey")
         .and_then(Value::as_str)
         .map(ToString::to_string)
+}
+
+fn account_key_index(account_keys: &[Value], pubkey: &str) -> Option<usize> {
+    for (idx, entry) in account_keys.iter().enumerate() {
+        if entry.as_str() == Some(pubkey)
+            || entry.get("pubkey").and_then(Value::as_str) == Some(pubkey)
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn token_balance_maps(tx_json: &Value) -> (HashMap<usize, f64>, HashMap<usize, f64>) {
+    (
+        token_balance_map(
+            tx_json
+                .pointer("/result/meta/preTokenBalances")
+                .and_then(Value::as_array)
+                .or_else(|| {
+                    tx_json
+                        .pointer("/result/transaction/meta/preTokenBalances")
+                        .and_then(Value::as_array)
+                }),
+        ),
+        token_balance_map(
+            tx_json
+                .pointer("/result/meta/postTokenBalances")
+                .and_then(Value::as_array)
+                .or_else(|| {
+                    tx_json
+                        .pointer("/result/transaction/meta/postTokenBalances")
+                        .and_then(Value::as_array)
+                }),
+        ),
+    )
+}
+
+fn token_balance_map(entries: Option<&Vec<Value>>) -> HashMap<usize, f64> {
+    let mut out = HashMap::new();
+    let Some(entries) = entries else {
+        return out;
+    };
+
+    for entry in entries {
+        let Some(account_index) = entry.get("accountIndex").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(amount) = token_balance_ui_amount(entry) else {
+            continue;
+        };
+        out.insert(account_index as usize, amount);
+    }
+    out
+}
+
+fn token_balance_ui_amount(entry: &Value) -> Option<f64> {
+    let ui = entry.get("uiTokenAmount")?;
+    ui.get("uiAmount").and_then(Value::as_f64).or_else(|| {
+        ui.get("uiAmountString")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse::<f64>().ok())
+    })
 }
 
 fn decode_instruction_data(ix: &Value) -> Option<Vec<u8>> {
@@ -543,6 +752,13 @@ fn parse_pubkey(data: &[u8], offset: &mut usize) -> Option<String> {
     let bytes: [u8; 32] = data[*offset..*offset + 32].try_into().ok()?;
     *offset += 32;
     Some(Pubkey::new_from_array(bytes).to_string())
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

@@ -126,7 +126,7 @@ impl TrackingManager {
             state = "new",
             "tracking pool created"
         );
-        self.notify(&format_new_pool_message(&view)).await;
+        self.notify_default(&format_new_pool_message(&view)).await;
 
         self.pools.insert(key, pool);
         self.evict_if_needed();
@@ -316,18 +316,16 @@ impl TrackingManager {
                         >= Duration::from_secs(self.cfg.holders_refresh_interval_secs.max(30))
                 })
                 .unwrap_or(true);
-            if should_refresh_holders {
-                if let Some(holders) = self
+            if should_refresh_holders
+                && let Some(holders) = self
                     .fetch_top_holders_with_timeout(&pool.seed.event.token_mint)
                     .await
-                {
-                    if !holders.is_empty() {
-                        pool.holders = holders;
-                        pool.holder_aggregates = HolderAggregates::from_holders(&pool.holders);
-                        pool.last_top_holders_refresh_at = Some(Instant::now());
-                        reason = Some("holders_refresh".to_string());
-                    }
-                }
+                && !holders.is_empty()
+            {
+                pool.holders = holders;
+                pool.holder_aggregates = HolderAggregates::from_holders(&pool.holders);
+                pool.last_top_holders_refresh_at = Some(Instant::now());
+                reason = Some("holders_refresh".to_string());
             }
         }
 
@@ -468,7 +466,8 @@ impl TrackingManager {
         }
 
         let view = self.build_view(pool, Some(reason.to_string()), score_delta);
-        self.notify(&format_update_pool_message(&view)).await;
+        self.notify_default(&format_update_pool_message(&view))
+            .await;
         pool.last_notified_at = Some(now);
         pool.last_notified_score = Some(pool.score.score);
         pool.last_update_reason = Some(reason.to_string());
@@ -482,7 +481,7 @@ impl TrackingManager {
             return;
         }
         let view = self.build_view(pool, Some("entry_go".to_string()), Some(0));
-        self.notify(&format_entry_go_message(&view)).await;
+        self.notify_sim(&format_entry_go_message(&view)).await;
         pool.last_entry_alert_state = Some(EntrySignalState::Go);
         pool.last_notified_at = Some(Instant::now());
     }
@@ -528,9 +527,15 @@ impl TrackingManager {
         }
     }
 
-    async fn notify(&self, text: &str) {
+    async fn notify_default(&self, text: &str) {
         if let Some(tg) = &self.telegram {
             tg.send_event(text).await;
+        }
+    }
+
+    async fn notify_sim(&self, text: &str) {
+        if let Some(tg) = &self.telegram {
+            tg.send_sim(text).await;
         }
     }
 
@@ -561,7 +566,7 @@ impl TrackingManager {
                 };
                 pool.shadow_trade = Some(trade);
                 let msg = self.format_shadow_open_message(pool);
-                self.notify(&msg).await;
+                self.notify_sim(&msg).await;
             }
             return;
         }
@@ -616,7 +621,7 @@ impl TrackingManager {
                 hold_secs,
                 entry_score,
             );
-            self.notify(&msg).await;
+            self.notify_sim(&msg).await;
         }
     }
 

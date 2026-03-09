@@ -24,14 +24,30 @@ pub struct RaydiumClmmWatcher {
     program_id: Pubkey,
     allowed_quote_mints: HashSet<String>,
     venue: VenueId,
+    watcher_name: &'static str,
 }
 
 impl RaydiumClmmWatcher {
     pub fn new(program_id: Pubkey, allowed_quote_mints: HashSet<String>) -> Self {
+        Self::new_with_venue(
+            program_id,
+            allowed_quote_mints,
+            VenueId::new("raydium", "clmm", "Raydium CLMM"),
+            "raydium_clmm",
+        )
+    }
+
+    pub fn new_with_venue(
+        program_id: Pubkey,
+        allowed_quote_mints: HashSet<String>,
+        venue: VenueId,
+        watcher_name: &'static str,
+    ) -> Self {
         Self {
             program_id,
             allowed_quote_mints,
-            venue: VenueId::new("raydium", "clmm", "Raydium CLMM"),
+            venue,
+            watcher_name,
         }
     }
 
@@ -178,7 +194,7 @@ impl RaydiumClmmWatcher {
 
 impl VenueWatcher for RaydiumClmmWatcher {
     fn name(&self) -> &'static str {
-        "raydium_clmm"
+        self.watcher_name
     }
 
     fn spawn(self: Box<Self>, runtime: VenueRuntime) -> JoinHandle<()> {
@@ -216,7 +232,9 @@ fn remember_signature(
 fn log_has_create_pool(logs: &[String]) -> bool {
     logs.iter().any(|line| {
         let lower = line.to_ascii_lowercase();
-        lower.contains("instruction: createpool") || lower.contains("instruction: create_pool")
+        lower.contains("instruction: createpool")
+            || lower.contains("instruction: create_pool")
+            || lower.contains("instruction: create pool")
     })
 }
 

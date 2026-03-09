@@ -109,7 +109,7 @@ fn flow_tracking_wired_for_venue(view: &PoolNotificationView) -> bool {
             view.event.venue.dex.as_str(),
             view.event.venue.kind.as_str()
         ),
-        ("meteora", "damm")
+        ("meteora", "damm") | ("pumpswap", "amm")
     )
 }
 

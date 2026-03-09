@@ -2,7 +2,7 @@ use crate::constants::{
     MAX_SEEN_SIGNATURES, MINT_BONK, MINT_JITOSOL, MINT_USDC, MINT_USDT, MINT_WSOL,
 };
 use crate::domain::{FlowSide, PoolSwapFlowEvent, VenueEvent, VenueId};
-use crate::services::select_token_and_quote;
+use crate::services::{select_token_and_quote, select_token_and_quote_strict};
 use crate::venues::{VenueRuntime, VenueWatcher};
 use anchor_lang::event::EVENT_IX_TAG_LE;
 use anyhow::{Context, Result};
@@ -231,7 +231,7 @@ impl MeteoraDammWatcher {
                             continue;
                         };
 
-                        let Some((_, quote_mint)) = select_token_and_quote(
+                        let Some((_, quote_mint)) = select_token_and_quote_strict(
                             token_a_mint,
                             token_b_mint,
                             &self.allowed_quote_mints,

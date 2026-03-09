@@ -23,3 +23,4 @@ solana-rpc-client = "3.1.6"
 solana-rpc-client-types = "3.1.5"
 anchor-lang = "0.32.1"
 raydium-amm-v3 = { git = "https://github.com/raydium-io/raydium-amm-v3.git", features = ["client", "no-entrypoint"] }
+rusqlite = { version = "0.31", features = ["bundled"] }

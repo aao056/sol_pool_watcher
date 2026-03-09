@@ -3,18 +3,18 @@ mod constants;
 mod domain;
 mod notifier;
 mod pipeline;
-mod pool_registry;
+mod pool_store;
 mod services;
 mod tracking;
 mod venues;
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use config::parse_cfg;
 use constants::{DEFAULT_RPC_TIMEOUT_SECS, HEALTHCHECK_INTERVAL_SECS};
 use notifier::TelegramNotifier;
 use pipeline::EventPipeline;
-use pool_registry::PoolRegistry;
+use pool_store::PoolStore;
 use reqwest::Client as HttpClient;
 use serde_json::{Value, json};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::time::Duration;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
-use venues::{VenueRuntime, build_watchers};
+use venues::{VenueRuntime, build_watcher_by_name, build_watchers};
 
 #[derive(Parser, Debug)]
 #[command(name = "sol_pool_listener")]
@@ -31,6 +31,14 @@ use venues::{VenueRuntime, build_watchers};
 struct Cli {
     #[arg(long, default_value = "cfg.toml")]
     cfg: String,
+    #[arg(long, value_enum, default_value_t = AppMode::Normal)]
+    mode: AppMode,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AppMode {
+    Normal,
+    Sim,
 }
 
 fn required_env(key: &str) -> Result<String> {
@@ -41,6 +49,13 @@ fn required_env(key: &str) -> Result<String> {
         anyhow::bail!("environment variable {key} is empty");
     }
     Ok(trimmed.to_string())
+}
+
+fn env_or_default(key: &str, default: &str) -> String {
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => default.to_string(),
+    }
 }
 
 fn helius_endpoints(api_key: &str) -> (String, String) {
@@ -99,6 +114,12 @@ async fn main() -> Result<()> {
     let cfg = parse_cfg(&args.cfg)?;
     let helius_api_key = required_env("HELIUS_API_KEY")?;
     let (rpc_url, wss_url) = helius_endpoints(&helius_api_key);
+    let sim_mode = matches!(args.mode, AppMode::Sim);
+    let mut tracking_cfg = cfg.tracking.clone();
+    if sim_mode && !tracking_cfg.enabled {
+        tracking_cfg.enabled = true;
+        info!("sim mode enabled: overriding tracking.enabled=false -> true");
+    }
 
     let rpc_client = Arc::new(RpcClient::new(rpc_url.clone()));
     let http_client = HttpClient::builder()
@@ -107,6 +128,9 @@ async fn main() -> Result<()> {
         .context("failed to create HTTP client")?;
 
     let telegram = TelegramNotifier::from_env();
+    let pool_db_path = env_or_default("POOL_DB_PATH", "data/pools.db");
+    let pool_store = Arc::new(PoolStore::open(&pool_db_path)?);
+
     let watchers = build_watchers(&cfg)?;
     if watchers.is_empty() {
         warn!("no active venue watchers; exiting");
@@ -117,12 +141,15 @@ async fn main() -> Result<()> {
         cfg = %args.cfg,
         rpc_url = "https://mainnet.helius-rpc.com/?api-key=***",
         ws_url = "wss://mainnet.helius-rpc.com/?api-key=***",
+        pool_db_path = %pool_db_path,
+        mode = ?args.mode,
         telegram_enabled = telegram.is_some(),
         "starting multi-venue listener"
     );
 
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (flow_tx, flow_rx) = tokio::sync::mpsc::unbounded_channel();
+    let health_telegram = telegram.clone();
 
     let runtime = VenueRuntime {
         ws_url: wss_url.clone(),
@@ -133,7 +160,6 @@ async fn main() -> Result<()> {
         flow_tx: flow_tx.clone(),
     };
     let health_http_client = http_client.clone();
-
     let mut watcher_tasks = Vec::new();
     for watcher in watchers {
         let name = watcher.name().to_string();
@@ -146,14 +172,10 @@ async fn main() -> Result<()> {
         http_client,
         rpc_client,
         rpc_url: rpc_url.clone(),
-        pool_registry: PoolRegistry::try_new_default(),
-        tracking: tracking::TrackingManager::new(
-            cfg.tracking.clone(),
-            health_http_client.clone(),
-            rpc_url.clone(),
-            telegram.clone(),
-        ),
         telegram,
+        pool_store: Some(pool_store),
+        sim_mode,
+        tracking_cfg,
     };
     let pipeline_task = tokio::spawn(pipeline.run(event_rx, flow_rx));
 
@@ -185,15 +207,45 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                for (name, task) in &watcher_tasks {
-                    if task.is_finished() && reported_dead_watchers.insert(name.clone()) {
+                for (name, task) in &mut watcher_tasks {
+                    if !task.is_finished() {
+                        continue;
+                    }
+
+                    if reported_dead_watchers.insert(name.clone()) {
                         warn!(watcher = %name, "watcher task is no longer running");
+                        if let Some(tg) = &health_telegram {
+                            let msg = format!("⚠️ watcher down: {name}");
+                            tg.send_error(&msg).await;
+                        }
+                    }
+
+                    match build_watcher_by_name(&cfg, name) {
+                        Ok(Some(watcher)) => {
+                            warn!(watcher = %name, "attempting watcher restart");
+                            *task = watcher.spawn(runtime.clone());
+                            reported_dead_watchers.remove(name);
+                            info!(watcher = %name, "watcher task restarted");
+                        }
+                        Ok(None) => {
+                            warn!(watcher = %name, "watcher restart skipped (watcher disabled or unknown)");
+                        }
+                        Err(err) => {
+                            warn!(watcher = %name, ?err, "watcher restart failed");
+                            if let Some(tg) = &health_telegram {
+                                let msg = format!("❌ watcher restart failed: {name}\n{err:#}");
+                                tg.send_error(&msg).await;
+                            }
+                        }
                     }
                 }
 
                 if pipeline_task.is_finished() && !pipeline_dead_reported {
                     pipeline_dead_reported = true;
                     warn!("pipeline task is no longer running");
+                    if let Some(tg) = &health_telegram {
+                        tg.send_error("❌ pipeline task is no longer running").await;
+                    }
                 }
 
                 let watchers_alive = watcher_tasks.iter().filter(|(_, task)| !task.is_finished()).count();

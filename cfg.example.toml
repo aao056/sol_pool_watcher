@@ -6,9 +6,25 @@ allowed_quote_mints = [
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
 ]
 
+[venues.pancakeswap_clmm]
+enabled = true
+program_id = "HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
 [venues.raydium_amm]
 enabled = true
 program_id = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+allowed_quote_mints = [
+  "So11111111111111111111111111111111111111112", # SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+]
+
+[venues.raydium_cpmm]
+enabled = true
+program_id = "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C"
 allowed_quote_mints = [
   "So11111111111111111111111111111111111111112", # SOL
   "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC

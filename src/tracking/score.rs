@@ -74,22 +74,22 @@ pub fn compute_sniper_score(inputs: &SniperScoreInputs) -> SniperScoreSnapshot {
         }
     }
 
-    if let (Some(net_flow), Some(liq_quote)) = (inputs.net_flow_1m_quote, inputs.quote_liquidity) {
-        if liq_quote > 0.0 {
-            let ratio = net_flow / liq_quote;
-            if ratio > 0.10 {
-                score += 10;
-                reasons.push("strong net buy flow (1m)".to_string());
-            } else if ratio > 0.03 {
-                score += 5;
-                reasons.push("positive net flow (1m)".to_string());
-            } else if ratio < -0.10 {
-                score -= 12;
-                reasons.push("strong negative flow (1m)".to_string());
-            } else if ratio < -0.05 {
-                score -= 8;
-                reasons.push("negative net flow (1m)".to_string());
-            }
+    if let (Some(net_flow), Some(liq_quote)) = (inputs.net_flow_1m_quote, inputs.quote_liquidity)
+        && liq_quote > 0.0
+    {
+        let ratio = net_flow / liq_quote;
+        if ratio > 0.10 {
+            score += 10;
+            reasons.push("strong net buy flow (1m)".to_string());
+        } else if ratio > 0.03 {
+            score += 5;
+            reasons.push("positive net flow (1m)".to_string());
+        } else if ratio < -0.10 {
+            score -= 12;
+            reasons.push("strong negative flow (1m)".to_string());
+        } else if ratio < -0.05 {
+            score -= 8;
+            reasons.push("negative net flow (1m)".to_string());
         }
     }
 
@@ -186,19 +186,19 @@ pub fn compute_sniper_score(inputs: &SniperScoreInputs) -> SniperScoreSnapshot {
         }
     }
 
-    if let Some(has_fee) = inputs.tradeability.token2022_transfer_fee_extension {
-        if has_fee {
-            score -= 8;
-            reasons.push("token2022 transfer fee".to_string());
-            flags.push("⚠️ Transfer fee ext".to_string());
-        }
+    if let Some(has_fee) = inputs.tradeability.token2022_transfer_fee_extension
+        && has_fee
+    {
+        score -= 8;
+        reasons.push("token2022 transfer fee".to_string());
+        flags.push("⚠️ Transfer fee ext".to_string());
     }
 
-    if let Some(is_mutable) = inputs.tradeability.metadata_mutable {
-        if is_mutable {
-            score -= 3;
-            reasons.push("mutable metadata".to_string());
-        }
+    if let Some(is_mutable) = inputs.tradeability.metadata_mutable
+        && is_mutable
+    {
+        score -= 3;
+        reasons.push("mutable metadata".to_string());
     }
 
     if let Some(impact_bps) = inputs.impact_small_bps {

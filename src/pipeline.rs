@@ -1,23 +1,22 @@
+use crate::config::TrackingConfig;
 use crate::constants::MAX_SEEN_EVENTS;
-use crate::domain::{
-    FlowSide, PoolSwapFlowEvent, RugCheckReport, TokenMetadataLite, VenueEvent, symbol_for_mint,
-};
+use crate::domain::{FlowSide, PoolSwapFlowEvent, VenueEvent, symbol_for_mint};
 use crate::notifier::TelegramNotifier;
-use crate::pool_registry::{PoolRegistry, build_cross_venue_alert};
+use crate::pool_store::PoolStore;
 use crate::services::analytics::fetch_top_holders;
 use crate::services::message::build_telegram_message;
 use crate::services::metadata::fetch_token_metadata;
 use crate::services::rugcheck::{fetch_rugcheck_report, holders_from_rugcheck};
-use crate::tracking::model::{HolderAggregates, RugSnapshot};
+use crate::tracking::model::HolderAggregates;
 use crate::tracking::rolling::SwapSide;
 use crate::tracking::{PoolTrackingSeed, TrackingManager, rug_snapshot_from_report};
 use reqwest::Client as HttpClient;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 fn remember_key(
     seen: &mut HashSet<String>,
@@ -42,32 +41,54 @@ pub struct EventPipeline {
     pub rpc_client: Arc<RpcClient>,
     pub rpc_url: String,
     pub telegram: Option<TelegramNotifier>,
-    pub pool_registry: Option<PoolRegistry>,
-    pub tracking: Option<TrackingManager>,
+    pub pool_store: Option<Arc<PoolStore>>,
+    pub sim_mode: bool,
+    pub tracking_cfg: TrackingConfig,
 }
 
 impl EventPipeline {
     pub async fn run(
-        mut self,
+        self,
         mut rx: UnboundedReceiver<VenueEvent>,
         mut flow_rx: UnboundedReceiver<PoolSwapFlowEvent>,
     ) {
+        let EventPipeline {
+            http_client,
+            rpc_client,
+            rpc_url,
+            telegram,
+            pool_store,
+            sim_mode,
+            tracking_cfg,
+        } = self;
+
         let mut seen_events: HashSet<String> = HashSet::new();
         let mut seen_order: VecDeque<String> = VecDeque::new();
-
-        let mut tracking_tick = self
-            .tracking
+        let mut tracking_manager = if sim_mode {
+            let mut cfg = tracking_cfg;
+            cfg.enabled = true;
+            TrackingManager::new(cfg, http_client.clone(), rpc_url.clone(), telegram.clone())
+        } else {
+            None
+        };
+        let tracking_enabled = tracking_manager.is_some();
+        let tracking_tick_secs = tracking_manager
             .as_ref()
-            .map(|t| tokio::time::interval(Duration::from_secs(t.poll_interval_secs())));
-        if let Some(interval) = &mut tracking_tick {
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        }
+            .map(|m| m.poll_interval_secs())
+            .unwrap_or(60);
+        let mut tracking_interval = tokio::time::interval(Duration::from_secs(tracking_tick_secs));
+        tracking_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut event_stream_open = true;
+        let mut flow_stream_open = true;
 
         loop {
             tokio::select! {
-                maybe_event = rx.recv() => {
+                maybe_event = rx.recv(), if event_stream_open => {
                     let Some(event) = maybe_event else {
-                        break;
+                        event_stream_open = false;
+                        info!("event stream closed");
+                        continue;
                     };
 
                     if !remember_key(
@@ -79,49 +100,65 @@ impl EventPipeline {
                         continue;
                     }
 
-                    let detected_at_unix = now_unix_secs();
+                    info!(
+                        venue = %event.venue.slug(),
+                        signature = %event.signature,
+                        pool_id = %event.pool_id,
+                        token_mint = %event.token_mint,
+                        quote_mint = %event.quote_mint,
+                        "new pool detected"
+                    );
 
-                    if let Some(registry) = &self.pool_registry {
-                        match registry.insert_pool_and_match(&event, detected_at_unix) {
-                            Ok(Some(match_info)) => {
-                                match registry
-                                    .enqueue_cross_venue_candidate(&match_info, detected_at_unix)
-                                {
-                                    Ok(candidate_id) => {
-                                        info!(
-                                            candidate_id,
-                                            token_mint = %event.token_mint,
-                                            quote_mint = %event.quote_mint,
-                                            venues_count = match_info.unique_venues.len(),
-                                            "arb candidate queued"
+                    if let Some(store) = &pool_store {
+                        match store.upsert_event(&event) {
+                            Ok(status) => {
+                                if status.became_eligible {
+                                    info!(
+                                        token_mint = %event.token_mint,
+                                        quote_mint = %event.quote_mint,
+                                        dex_count = status.dex_count,
+                                        pool_count = status.pool_count,
+                                        "pair reached multi-dex threshold and is now eligible for arb monitoring"
+                                    );
+
+                                    if !sim_mode
+                                        && let Some(notifier) = &telegram
+                                    {
+                                        let msg = format!(
+                                            "Multi-dex candidate detected\n\nToken: {}\nQuote: {}\nDexes: {}\nPools: {}\nLatest pool: {}\nVenue: {}",
+                                            event.token_mint,
+                                            event.quote_mint,
+                                            status.dex_count,
+                                            status.pool_count,
+                                            event.pool_id,
+                                            event.venue.display_name,
                                         );
+                                        notifier.send_event(&msg).await;
                                     }
-                                    Err(err) => {
-                                        info!(?err, "failed to queue arb candidate");
-                                    }
+                                } else if status.eligible {
+                                    info!(
+                                        token_mint = %event.token_mint,
+                                        quote_mint = %event.quote_mint,
+                                        dex_count = status.dex_count,
+                                        pool_count = status.pool_count,
+                                        "pair remains eligible for arb monitoring"
+                                    );
                                 }
-                                info!(
-                                    venue = %event.venue.slug(),
+                            }
+                            Err(err) => {
+                                warn!(
+                                    ?err,
                                     pool_id = %event.pool_id,
                                     token_mint = %event.token_mint,
                                     quote_mint = %event.quote_mint,
-                                    venues = ?match_info.unique_venues,
-                                    "cross-venue pair detected"
+                                    "failed to persist pool event to DB"
                                 );
-                                if let Some(notifier) = &self.telegram {
-                                    let alert = build_cross_venue_alert(&event, &match_info);
-                                    notifier.send_event(&alert).await;
-                                }
-                            }
-                            Ok(None) => {}
-                            Err(err) => {
-                                info!(?err, "pool registry insert/query failed");
                             }
                         }
                     }
 
-                    let token_meta_fut = fetch_token_metadata(self.rpc_client.as_ref(), &event.token_mint);
-                    let rugcheck_fut = fetch_rugcheck_report(&self.http_client, &event.token_mint);
+                    let token_meta_fut = fetch_token_metadata(rpc_client.as_ref(), &event.token_mint);
+                    let rugcheck_fut = fetch_rugcheck_report(&http_client, &event.token_mint);
                     let (token_meta, rugcheck) = tokio::join!(token_meta_fut, rugcheck_fut);
 
                     let mut top_holders = rugcheck
@@ -129,33 +166,39 @@ impl EventPipeline {
                         .map(|report| holders_from_rugcheck(report, 10))
                         .unwrap_or_default();
                     if top_holders.is_empty() {
-                        top_holders =
-                            fetch_top_holders(&self.http_client, &self.rpc_url, &event.token_mint, 10)
-                                .await
-                                .unwrap_or_default();
+                        top_holders = fetch_top_holders(&http_client, &rpc_url, &event.token_mint, 10)
+                            .await
+                            .unwrap_or_default();
                     }
 
-                    let token_symbol = symbol_for_mint(&event.token_mint);
-                    let quote_symbol = symbol_for_mint(&event.quote_mint);
-                    let cfg_symbol = format!("{token_symbol}_{quote_symbol}");
+                    if let Some(manager) = tracking_manager.as_mut() {
+                        let token_symbol = token_meta
+                            .as_ref()
+                            .and_then(|m| m.symbol.clone())
+                            .unwrap_or_else(|| symbol_for_mint(&event.token_mint));
+                        let token_name = token_meta
+                            .as_ref()
+                            .and_then(|m| m.name.clone())
+                            .unwrap_or_else(|| token_symbol.clone());
+                        let seed = PoolTrackingSeed {
+                            event: event.clone(),
+                            detected_at_unix: now_unix_secs(),
+                            token_name,
+                            token_symbol,
+                            quote_symbol: symbol_for_mint(&event.quote_mint),
+                            top_holders: top_holders.clone(),
+                            holder_aggregates: HolderAggregates::from_holders(&top_holders),
+                            rug: rugcheck
+                                .as_ref()
+                                .map(rug_snapshot_from_report)
+                                .unwrap_or_default(),
+                        };
+                        manager.on_new_pool(seed).await;
+                    }
 
-                    info!(
-                        venue = %event.venue.slug(),
-                        signature = %event.signature,
-                        pool_id = %event.pool_id,
-                        token_mint = %event.token_mint,
-                        quote_mint = %event.quote_mint,
-                        cfg_symbol = %cfg_symbol,
-                        "new pool detected"
-                    );
-
-                    if let Some(tracker) = self.tracking.as_mut() {
-                        let seed = build_tracking_seed(&event, token_meta.as_ref(), rugcheck.as_ref(), &top_holders);
-                        // Preserve registry timestamp for tracker timing consistency.
-                        let mut seed = seed;
-                        seed.detected_at_unix = detected_at_unix;
-                        tracker.on_new_pool(seed).await;
-                    } else if let Some(notifier) = &self.telegram {
+                    if !sim_mode
+                        && let Some(notifier) = &telegram
+                    {
                         let message = build_telegram_message(
                             &event,
                             token_meta.as_ref(),
@@ -165,35 +208,36 @@ impl EventPipeline {
                         notifier.send_event(&message).await;
                     }
                 }
-                maybe_flow = flow_rx.recv() => {
-                    let Some(flow) = maybe_flow else {
+                maybe_flow = flow_rx.recv(), if flow_stream_open => {
+                    let Some(flow_event) = maybe_flow else {
+                        flow_stream_open = false;
+                        info!("pool flow stream closed");
                         continue;
                     };
-
-                    if let Some(tracker) = self.tracking.as_mut() {
-                        let side = match flow.side {
+                    if let Some(manager) = tracking_manager.as_mut() {
+                        let side = match flow_event.side {
                             FlowSide::Buy => SwapSide::Buy,
                             FlowSide::Sell => SwapSide::Sell,
                         };
-                        tracker.on_swap_quote_flow(
-                            &flow.pool_dedupe_key(),
+                        manager.on_swap_quote_flow(
+                            &flow_event.pool_dedupe_key(),
                             side,
-                            flow.quote_volume,
-                            flow.quote_liquidity,
-                            flow.mark_price_ratio,
-                            flow.ts_unix,
+                            flow_event.quote_volume,
+                            flow_event.quote_liquidity,
+                            flow_event.mark_price_ratio,
+                            flow_event.ts_unix,
                         );
                     }
                 }
-                _ = async {
-                    if let Some(interval) = &mut tracking_tick {
-                        interval.tick().await;
-                    }
-                }, if tracking_tick.is_some() => {
-                    if let Some(tracker) = self.tracking.as_mut() {
-                        tracker.on_tick().await;
+                _ = tracking_interval.tick(), if tracking_enabled => {
+                    if let Some(manager) = tracking_manager.as_mut() {
+                        manager.on_tick().await;
                     }
                 }
+            }
+
+            if !event_stream_open && !flow_stream_open {
+                break;
             }
         }
 
@@ -201,41 +245,9 @@ impl EventPipeline {
     }
 }
 
-fn build_tracking_seed(
-    event: &VenueEvent,
-    token_meta: Option<&TokenMetadataLite>,
-    rugcheck: Option<&RugCheckReport>,
-    top_holders: &[crate::domain::HolderShare],
-) -> PoolTrackingSeed {
-    let token_symbol = token_meta
-        .and_then(|m| m.symbol.clone())
-        .or_else(|| rugcheck.and_then(|r| r.file_meta.symbol.clone()))
-        .or_else(|| rugcheck.and_then(|r| r.token_meta.symbol.clone()))
-        .unwrap_or_else(|| symbol_for_mint(&event.token_mint));
-    let token_name = token_meta
-        .and_then(|m| m.name.clone())
-        .or_else(|| rugcheck.and_then(|r| r.file_meta.name.clone()))
-        .or_else(|| rugcheck.and_then(|r| r.token_meta.name.clone()))
-        .unwrap_or_else(|| token_symbol.clone());
-    let quote_symbol = symbol_for_mint(&event.quote_mint);
-
-    PoolTrackingSeed {
-        event: event.clone(),
-        detected_at_unix: now_unix_secs(),
-        token_name,
-        token_symbol,
-        quote_symbol,
-        top_holders: top_holders.to_vec(),
-        holder_aggregates: HolderAggregates::from_holders(top_holders),
-        rug: rugcheck
-            .map(rug_snapshot_from_report)
-            .unwrap_or_else(RugSnapshot::default),
-    }
-}
-
 fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
